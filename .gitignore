@@ -1,0 +1,10 @@
+.venv/
+.venv-agent/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+web/dist/
+.env
+.env.local
+.vercel/
