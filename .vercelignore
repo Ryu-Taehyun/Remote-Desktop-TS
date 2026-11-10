@@ -1,9 +1,0 @@
-agent/
-tests/
-.venv/
-.venv-agent/
-web/node_modules/
-web/dist/
-docker-compose.yml
-*.pyc
-__pycache__/

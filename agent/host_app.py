@@ -119,7 +119,7 @@ class HostApp(tk.Tk):
             f.pack(fill="x")
             return f
 
-        field("서버 주소 (예: https://your-app.vercel.app)", server)
+        field("서버 주소 (예: http://192.168.0.10:8000)", server)
         field("이메일", email)
         name_row = field("이름", username)
         pw_row = field("비밀번호", password, show="•")

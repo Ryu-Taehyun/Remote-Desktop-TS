@@ -7,5 +7,5 @@ node_modules/
 web/dist/
 .env
 .env.local
-.vercel/
+.jwt_secret
 remote-desktop.zip

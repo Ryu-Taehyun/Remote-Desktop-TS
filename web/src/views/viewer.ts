@@ -7,7 +7,7 @@ const BUTTONS: Record<number, MouseButton> = { 0: "left", 1: "middle", 2: "right
 /**
  * 원격 화면 뷰어.
  *  1) 실시간 모드: WebSocket 으로 JPEG 프레임을 바로 받고 입력도 즉시 전송 (로컬/상시 서버)
- *  2) 호환 모드: WebSocket 을 쓸 수 없으면(Vercel 서버리스 등) HTTP 폴링으로 자동 전환
+ *  2) 호환 모드: WebSocket 이 막힌 환경(일부 프록시·방화벽)에서는 HTTP 폴링으로 자동 전환
  */
 export function viewerView(sessionId: string, go: (hash: string) => void): { el: HTMLElement; dispose: () => void } {
   let disposed = false;

@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
-from fastapi.middleware.cors import CORSMiddleware
 
-from .config import CORS_ORIGINS
+from .config import CORS_ORIGINS, WEB_DIST
 from .db import engine
 from . import realtime
 from .routers import auth, sessions
@@ -51,3 +52,13 @@ def health_db() -> JSONResponse:
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=503, content={"status": "error", "detail": _db_error_text(e)})
     return JSONResponse({"status": "ok", "database": "connected"})
+
+
+# 빌드된 웹 화면(web/dist)을 같은 서버에서 제공 → http://<서버IP>:8000 하나로 접속.
+# API 라우트를 모두 등록한 뒤 마지막에 마운트해야 /api 가 우선한다.
+if (WEB_DIST / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+else:
+    @app.get("/", include_in_schema=False)
+    def no_web() -> JSONResponse:
+        return JSONResponse({"detail": "웹 화면이 빌드되지 않았습니다. web 폴더에서 npm install && npm run build 를 실행하세요."})
