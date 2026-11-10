@@ -1,6 +1,6 @@
 # 호스트(화면을 공유하는 PC)용 Python GUI 앱 의존성. tkinter 는 Python 표준 라이브러리.
-requests==2.32.3
-pydantic[email]==2.11.4
-mss==10.0.0
-Pillow==11.2.1
-pynput==1.8.1
+requests>=2.32,<3
+pydantic[email]>=2.12,<3
+mss>=10.0,<11
+Pillow>=11.3
+pynput>=1.8,<2
