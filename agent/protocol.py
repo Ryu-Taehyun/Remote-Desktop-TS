@@ -101,3 +101,35 @@ class InputBatchOut(Strict):
 
 class Ok(Strict):
     ok: Literal[True]
+
+
+# ---------- WebSocket 메시지 (실시간 모드) ----------
+class WsAuth(Strict):
+    type: Literal["auth"]
+    token: str
+
+
+class WsFrameMeta(Strict):
+    type: Literal["frame_meta"]
+    width: int
+    height: int
+
+
+class WsInput(Strict):
+    type: Literal["input"]
+    events: list[InputEvent]
+
+
+class WsStatus(Strict):
+    type: Literal["status"]
+    allow_control: bool
+    host_online: bool
+    viewers: int
+
+
+class WsError(Strict):
+    type: Literal["error"]
+    detail: str
+
+
+WsServerMessage = Annotated[Union[WsInput, WsStatus, WsError], Field(discriminator="type")]

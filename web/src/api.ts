@@ -9,6 +9,14 @@ import * as P from "./protocol";
 const TOKEN_KEY = "rd_token";
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? "";
 
+/** /api/ws/... 의 절대 WebSocket URL */
+export function wsUrl(path: string): string {
+  const base = new URL(API_BASE || "/", location.href);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  base.pathname = path;
+  return base.toString();
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);

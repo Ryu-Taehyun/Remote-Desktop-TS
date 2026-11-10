@@ -111,3 +111,92 @@ def test_full_remote_session():
 
     assert client.delete(f"/api/sessions/{sid}", headers=h(host)).status_code == 200
     assert client.get(f"/api/sessions/{sid}", headers=h(viewer)).status_code == 404
+
+
+# ---------------------------------------------------------------- WebSocket 실시간 모드
+import json  # noqa: E402
+
+JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+
+def ws_recv(ws, want: str, pred=lambda m: True, limit: int = 20):
+    """원하는 종류(bytes 또는 메시지 type)가 올 때까지 수신."""
+    for _ in range(limit):
+        m = ws.receive()
+        if m.get("bytes") is not None:
+            if want == "bytes":
+                return m["bytes"]
+            continue
+        if m.get("text") is not None:
+            msg = json.loads(m["text"])
+            if msg["type"] == want and pred(msg):
+                return msg
+        if m["type"] == "websocket.close":
+            raise AssertionError(f"closed while waiting for {want}")
+    raise AssertionError(f"did not receive {want}")
+
+
+def test_websocket_realtime():
+    host, viewer = signup("wshost"), signup("wsviewer")
+    s = client.post("/api/sessions", json={"name": "WS PC"}, headers=h(host)).json()
+    sid = s["id"]
+    client.post("/api/sessions/join", json={"access_code": s["access_code"]}, headers=h(viewer))
+    htok = host["Authorization"].split()[1]
+    vtok = viewer["Authorization"].split()[1]
+
+    # 인증 실패
+    with client.websocket_connect(f"/api/ws/view/{sid}") as bad:
+        bad.send_text(json.dumps({"type": "auth", "token": "nope"}))
+        assert ws_recv(bad, "error")["detail"] == "인증이 필요합니다"
+    # 뷰어는 호스트 소켓에 붙을 수 없음
+    with client.websocket_connect(f"/api/ws/host/{sid}") as bad:
+        bad.send_text(json.dumps({"type": "auth", "token": vtok}))
+        assert ws_recv(bad, "error")["detail"] == "세션 소유자만 가능합니다"
+
+    with client.websocket_connect(f"/api/ws/host/{sid}") as hws, client.websocket_connect(f"/api/ws/view/{sid}") as vws:
+        hws.send_text(json.dumps({"type": "auth", "token": htok}))
+        assert ws_recv(hws, "status")["allow_control"] is False
+        vws.send_text(json.dumps({"type": "auth", "token": vtok}))
+        ws_recv(vws, "status")
+
+        # 프레임: 호스트 → 뷰어 (DB 미경유)
+        hws.send_text(json.dumps({"type": "frame_meta", "width": 1280, "height": 720}))
+        hws.send_bytes(JPEG)
+        assert ws_recv(vws, "bytes") == JPEG
+        # JPEG 이 아닌 바이너리 / 정의되지 않은 텍스트는 거부
+        hws.send_bytes(b"MZ-not-a-jpeg")
+        assert "JPEG" in ws_recv(hws, "error")["detail"]
+        hws.send_text(json.dumps({"type": "shell_exec", "cmd": "whoami"}))
+        ws_recv(hws, "error")
+
+        # HTTP 폴링 뷰어도 WebSocket 호스트의 프레임을 받음
+        f = client.get(f"/api/sessions/{sid}/frame", headers=h(viewer)).json()
+        assert base64.b64decode(f["data_b64"]) == JPEG and f["width"] == 1280
+        assert client.get(f"/api/sessions/{sid}/frame?after={f['seq']}", headers=h(viewer)).status_code == 204
+
+        # 제어 미허용 시 입력 거부
+        move = {"type": "input", "events": [{"type": "mouse_move", "x": 0.1, "y": 0.2}]}
+        vws.send_text(json.dumps(move))
+        assert "허용" in ws_recv(vws, "error")["detail"]
+
+        # 허용하면 호스트에 즉시 상태 알림, 입력이 바로 전달됨
+        client.patch(f"/api/sessions/{sid}", json={"allow_control": True}, headers=h(host))
+        ws_recv(hws, "status", lambda m: m["allow_control"] is True)
+        vws.send_text(json.dumps(move))
+        got = ws_recv(hws, "input")
+        assert got["events"] == [{"type": "mouse_move", "x": 0.1, "y": 0.2}]
+        # 잘못된 이벤트는 호스트까지 가지 않음
+        vws.send_text(json.dumps({"type": "input", "events": [{"type": "mouse_move", "x": 5, "y": 0}]}))
+        ws_recv(vws, "error")
+
+        # HTTP 로 보낸 입력도 WebSocket 호스트에 바로 전달 (DB 큐에 쌓이지 않음)
+        r = client.post(f"/api/sessions/{sid}/input", json={"events": [{"type": "key_down", "key": "a", "code": "KeyA"}]},
+                        headers=h(viewer))
+        assert r.status_code == 200
+        assert ws_recv(hws, "input")["events"][0]["key"] == "a"
+        assert client.get(f"/api/sessions/{sid}/input", headers=h(host)).json()["events"] == []
+
+        # 세션 종료 시 양쪽 모두 알림
+        client.delete(f"/api/sessions/{sid}", headers=h(host))
+        assert "종료" in ws_recv(hws, "error")["detail"]
+        assert "종료" in ws_recv(vws, "error")["detail"]

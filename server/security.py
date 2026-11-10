@@ -32,6 +32,15 @@ def create_token(user_id: uuid.UUID) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=_ALG)
 
 
+def user_from_token(db: Session, token: str) -> User | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[_ALG])
+        user_id = uuid.UUID(payload["sub"])
+    except (jwt.PyJWTError, KeyError, ValueError):
+        return None
+    return db.get(User, user_id)
+
+
 def current_user(
     cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: Session = Depends(get_db),
@@ -39,12 +48,7 @@ def current_user(
     unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "인증이 필요합니다", {"WWW-Authenticate": "Bearer"})
     if cred is None:
         raise unauthorized
-    try:
-        payload = jwt.decode(cred.credentials, JWT_SECRET, algorithms=[_ALG])
-        user_id = uuid.UUID(payload["sub"])
-    except (jwt.PyJWTError, KeyError, ValueError):
-        raise unauthorized
-    user = db.get(User, user_id)
+    user = user_from_token(db, cred.credentials)
     if user is None:
         raise unauthorized
     return user

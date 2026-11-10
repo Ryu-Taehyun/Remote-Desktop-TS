@@ -130,3 +130,37 @@ class InputBatchOut(Strict):
 
 class Ok(Strict):
     ok: Literal[True] = True
+
+
+# ---------- WebSocket 메시지 (실시간 모드) ----------
+# 바이너리 메시지 = JPEG 프레임 1장. 텍스트 메시지는 아래 타입만 허용된다.
+class WsAuth(Strict):
+    """연결 직후 클라이언트가 보내는 첫 메시지 (토큰을 URL 에 노출하지 않기 위함)."""
+    type: Literal["auth"]
+    token: str = Field(min_length=1, max_length=4096)
+
+
+class WsFrameMeta(Strict):
+    """호스트 → 서버: 해상도가 바뀔 때만 전송."""
+    type: Literal["frame_meta"]
+    width: int = Field(gt=0, le=8192)
+    height: int = Field(gt=0, le=8192)
+
+
+class WsInput(Strict):
+    """뷰어 → 서버 → 호스트 입력 이벤트."""
+    type: Literal["input"]
+    events: list[InputEventPayload] = Field(min_length=1, max_length=200)
+
+
+class WsStatus(Strict):
+    """서버 → 클라이언트 상태 알림."""
+    type: Literal["status"]
+    allow_control: bool
+    host_online: bool
+    viewers: int
+
+
+class WsError(Strict):
+    type: Literal["error"]
+    detail: str

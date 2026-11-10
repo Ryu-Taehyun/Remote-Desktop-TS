@@ -53,6 +53,7 @@ class HostApp(tk.Tk):
         self.session: SessionOut | None = None
         self.stop_event = threading.Event()
         self.workers: list[threading.Thread] = []
+        self.rt = None  # RealtimeHost (WebSocket 실시간 연결)
         self.ui_queue: queue.Queue = queue.Queue()  # 워커 스레드 → UI 스레드 메시지
 
         self.container = ttk.Frame(self, padding=16)
@@ -171,7 +172,7 @@ class HostApp(tk.Tk):
 
         self.name_var = tk.StringVar(value=platform.node() or "My PC")
         self.control_var = tk.BooleanVar(value=False)
-        self.fps_var = tk.IntVar(value=4)
+        self.fps_var = tk.IntVar(value=15)
         self.quality_var = tk.IntVar(value=60)
         self.width_var = tk.StringVar(value="1280")
 
@@ -180,7 +181,7 @@ class HostApp(tk.Tk):
         ttk.Label(f, text="PC 이름").grid(row=0, column=0, sticky="w")
         ttk.Entry(f, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", pady=2)
         ttk.Label(f, text="FPS").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(f, from_=1, to=10, textvariable=self.fps_var, width=6).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Spinbox(f, from_=1, to=30, textvariable=self.fps_var, width=6).grid(row=1, column=1, sticky="w", pady=2)
         ttk.Label(f, text="JPEG 품질").grid(row=2, column=0, sticky="w")
         ttk.Scale(f, from_=20, to=90, variable=self.quality_var, orient="horizontal").grid(row=2, column=1, sticky="ew")
         ttk.Label(f, text="최대 너비(px)").grid(row=3, column=0, sticky="w")
@@ -233,8 +234,10 @@ class HostApp(tk.Tk):
             return
 
         def ok(s: SessionOut):
+            changed = not self.session or self.session.allow_control != s.allow_control
             self.session = s
-            self.write_log("원격 제어 " + ("허용" if s.allow_control else "차단"))
+            if changed:  # 서버 알림(_apply_control)이 먼저 처리했으면 중복 기록하지 않음
+                self.write_log("원격 제어 " + ("허용" if s.allow_control else "차단"))
 
         self.run_bg(lambda: api.set_control(sid, allow), ok)
 
@@ -304,30 +307,52 @@ class HostApp(tk.Tk):
         self.write_log(msg)
 
     def _frame_worker(self) -> None:
+        """화면 캡처 → 전송. WebSocket(실시간)을 먼저 시도하고, 안 되면 HTTP 로 보낸다."""
         from .capture import ScreenCapturer
+        from .realtime import RealtimeHost
 
-        assert self.api and self.session
-        api, sid = self.api, self.session.id
+        assert self.api and self.session and self.user
+        api, sid, token = self.api, self.session.id, self.user.access_token
         try:
             cap = ScreenCapturer()
         except Exception as e:
             self.ui(lambda: self._session_gone(f"화면 캡처 초기화 실패: {e}"))
             return
         self.monitor = cap.monitor
-        frames, t0, errors = 0, time.monotonic(), 0
+        frames, t0, errors, size = 0, time.monotonic(), 0, 0
+        last_jpeg, last_sent, next_ws_try = b"", 0.0, 0.0
         try:
             while not self.stop_event.is_set():
                 start = time.monotonic()
-                fps = max(1, min(10, int(self.fps_var.get() or 1)))
+                if self.rt is None and start >= next_ws_try:
+                    self.rt = RealtimeHost.connect(api.base_url, token, sid)
+                    next_ws_try = start + 10  # 실패하면 10초 뒤 재시도 (그동안 HTTP)
+                    mode = "실시간(WebSocket)" if self.rt else "호환 모드(HTTP)"
+                    self.ui(lambda m=mode: self.write_log(f"전송 방식: {m}"))
+                    if self.rt:
+                        self._apply_control(self.rt.status.allow_control)
+                rt = self.rt
+                max_fps = 30 if rt else 10
+                fps = max(1, min(max_fps, int(self.fps_var.get() or 1)))
                 try:
-                    frame = cap.grab(max_width=int(self.width_var.get()), quality=int(self.quality_var.get()))
-                    ack = api.upload_frame(sid, frame)
+                    jpeg, w, h = cap.grab_jpeg(max_width=int(self.width_var.get()), quality=int(self.quality_var.get()))
+                    size = len(jpeg)
+                    if rt is not None:
+                        # 화면이 그대로면 보내지 않음 (1초마다 한 번은 보내서 연결 유지)
+                        if jpeg != last_jpeg or start - last_sent > 1:
+                            rt.send_frame(jpeg, w, h)
+                            last_jpeg, last_sent = jpeg, start
+                            frames += 1
+                    else:
+                        import base64
+
+                        from .protocol import FrameUpload
+
+                        ack = api.upload_frame(sid, FrameUpload(
+                            width=w, height=h, mime="image/jpeg", data_b64=base64.b64encode(jpeg).decode()))
+                        frames += 1
+                        self._apply_control(ack.allow_control)
                     errors = 0
-                    frames += 1
-                    if ack.allow_control != self.control_var.get():  # 웹에서 변경된 경우 동기화
-                        self.ui(lambda v=ack.allow_control: self.control_var.set(v))
-                    if self.session:
-                        self.session = self.session.model_copy(update={"allow_control": ack.allow_control})
                 except ApiError as e:
                     if e.status in (403, 404):
                         self.ui(lambda: self._session_gone("세션이 종료되었습니다"))
@@ -336,44 +361,86 @@ class HostApp(tk.Tk):
                     self.ui(lambda m=str(e): self.write_log(f"업로드 실패: {m}"))
                 except Exception as e:
                     errors += 1
-                    self.ui(lambda m=f"{type(e).__name__}: {e}": self.write_log(f"전송 오류: {m}"))
+                    if rt is not None:  # WebSocket 이 끊김 → 곧바로 재연결 시도
+                        rt.close()
+                        self.rt, next_ws_try = None, 0.0
+                        self.ui(lambda: self.write_log("실시간 연결이 끊겨 다시 연결합니다"))
+                    else:
+                        self.ui(lambda m=f"{type(e).__name__}: {e}": self.write_log(f"전송 오류: {m}"))
                 if errors:
                     self.stop_event.wait(min(10, 2 ** errors))  # 지수 백오프
                     continue
                 now = time.monotonic()
                 if now - t0 >= 2:
                     rate = frames / (now - t0)
-                    self.ui(lambda r=rate, n=len(frame.data_b64): self.status_var.set(
-                        f"공유 중 · {r:.1f} fps · 프레임 {n * 3 // 4 // 1024} KB"))
+                    mode = "실시간" if self.rt else "HTTP"
+                    self.ui(lambda r=rate, n=size, m=mode: self.status_var.set(
+                        f"공유 중 · {m} · {r:.1f} fps · 프레임 {n // 1024} KB"))
                     frames, t0 = 0, now
                 self.stop_event.wait(max(0.0, 1 / fps - (time.monotonic() - start)))
         finally:
             cap.close()
+            if self.rt is not None:
+                self.rt.close()
+                self.rt = None
+
+    def _apply_control(self, allow: bool) -> None:
+        """서버/웹에서 바뀐 원격 제어 허용 여부를 UI 와 동기화."""
+        if self.session and self.session.allow_control != allow:
+            self.session = self.session.model_copy(update={"allow_control": allow})
+            self.ui(lambda: (self.control_var.set(allow), self.write_log("원격 제어 " + ("허용" if allow else "차단"))))
 
     def _input_worker(self) -> None:
+        """원격 입력 재생. 실시간 모드에서는 푸시로 즉시, HTTP 모드에서는 폴링으로 받는다."""
+        from .protocol import WsError, WsInput, WsStatus
+
         assert self.api and self.session
         api, sid = self.api, self.session.id
         player = None
-        while not self.stop_event.is_set():
-            if not (self.session and self.session.allow_control):
-                self.stop_event.wait(0.5)
-                continue
-            try:
-                if player is None:
-                    while not hasattr(self, "monitor") and not self.stop_event.is_set():
-                        self.stop_event.wait(0.1)
-                    from .input_control import InputPlayer
 
-                    player = InputPlayer(self.monitor)
+        def get_player():
+            nonlocal player
+            if player is None:
+                while not hasattr(self, "monitor") and not self.stop_event.is_set():
+                    self.stop_event.wait(0.1)
+                from .input_control import InputPlayer
+
+                player = InputPlayer(self.monitor)
+            return player
+
+        while not self.stop_event.is_set():
+            rt = self.rt
+            try:
+                if rt is not None:
+                    msg = rt.recv(timeout=0.5)
+                    if isinstance(msg, WsInput) and self.session and self.session.allow_control:
+                        p = get_player()
+                        for ev in msg.events:
+                            p.play(ev)
+                    elif isinstance(msg, WsStatus):
+                        self._apply_control(msg.allow_control)
+                    elif isinstance(msg, WsError):
+                        if "종료" in msg.detail:
+                            self.ui(lambda: self._session_gone("세션이 종료되었습니다"))
+                            return
+                        self.ui(lambda d=msg.detail: self.write_log(f"서버: {d}"))
+                    continue
+                if not (self.session and self.session.allow_control):
+                    self.stop_event.wait(0.3)
+                    continue
                 batch = api.drain_input(sid)
+                p = get_player()
                 for ev in batch.events:
-                    player.play(ev)
+                    p.play(ev)
                 self.stop_event.wait(0.03 if batch.events else 0.1)
             except ApiError as e:
                 if e.status in (403, 404):
                     return
                 self.stop_event.wait(1)
             except Exception as e:
+                if rt is not None:  # 연결 끊김 — 프레임 스레드가 재연결함
+                    self.stop_event.wait(0.2)
+                    continue
                 self.ui(lambda m=f"{type(e).__name__}: {e}": self.write_log(f"입력 처리 오류: {m}"))
                 self.stop_event.wait(1)
 

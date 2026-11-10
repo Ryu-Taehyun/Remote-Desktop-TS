@@ -93,3 +93,19 @@ export type SessionOut = z.infer<typeof SessionOut>;
 export type FrameOut = z.infer<typeof FrameOut>;
 export type InputEvent = z.infer<typeof InputEvent>;
 export type MouseButton = z.infer<typeof MouseButton>;
+
+// ---------- WebSocket 메시지 (실시간 모드) ----------
+// 서버 → 뷰어: 바이너리 = JPEG 프레임, 텍스트 = 아래 타입만
+export const WsAuth = z.object({ type: z.literal("auth"), token: z.string().min(1).max(4096) }).strict();
+export const WsInput = z.object({ type: z.literal("input"), events: z.array(InputEvent).min(1).max(200) }).strict();
+export const WsStatus = z
+  .object({
+    type: z.literal("status"),
+    allow_control: z.boolean(),
+    host_online: z.boolean(),
+    viewers: z.number().int(),
+  })
+  .strict();
+export const WsError = z.object({ type: z.literal("error"), detail: z.string() }).strict();
+export const WsServerMessage = z.discriminatedUnion("type", [WsStatus, WsError]);
+export type WsServerMessage = z.infer<typeof WsServerMessage>;

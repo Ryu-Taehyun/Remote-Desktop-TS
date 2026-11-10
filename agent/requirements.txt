@@ -4,3 +4,4 @@ pydantic[email]>=2.12,<3
 mss>=10.0,<11
 Pillow>=11.3
 pynput>=1.8,<2
+websockets>=13,<18

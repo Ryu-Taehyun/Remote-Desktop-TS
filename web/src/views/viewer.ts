@@ -1,18 +1,19 @@
-import { api, ApiError } from "../api";
+import { api, ApiError, auth, wsUrl } from "../api";
 import { h } from "../dom";
-import type { InputEvent, MouseButton, SessionOut } from "../protocol";
+import { WsAuth, WsInput, WsServerMessage, type InputEvent, type MouseButton, type SessionOut } from "../protocol";
 
 const BUTTONS: Record<number, MouseButton> = { 0: "left", 1: "middle", 2: "right" };
 
 /**
  * 원격 화면 뷰어.
- * Vercel 서버리스는 WebSocket 을 유지할 수 없으므로 HTTP 롱폴링 방식:
- *  - 프레임: GET /frame?after=seq 를 반복 (새 프레임 없으면 204)
- *  - 입력: 이벤트를 모아서 80ms 마다 POST /input 배치 전송
+ *  1) 실시간 모드: WebSocket 으로 JPEG 프레임을 바로 받고 입력도 즉시 전송 (로컬/상시 서버)
+ *  2) 호환 모드: WebSocket 을 쓸 수 없으면(Vercel 서버리스 등) HTTP 폴링으로 자동 전환
  */
 export function viewerView(sessionId: string, go: (hash: string) => void): { el: HTMLElement; dispose: () => void } {
   let disposed = false;
   let session: SessionOut | null = null;
+  let mode: "connecting" | "ws" | "http" = "connecting";
+  let ws: WebSocket | null = null;
   let seq = 0;
   let queue: InputEvent[] = [];
   let pendingMove: InputEvent | null = null;
@@ -48,17 +49,95 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
     go("#/");
   });
 
-  // ---------- 프레임 수신 루프 ----------
-  const frameLoop = async () => {
-    while (!disposed) {
+  // ---------- 프레임 표시: 디코딩이 밀리면 중간 프레임은 버리고 최신 것만 ----------
+  let showing = false;
+  let nextFrame: Blob | null = null;
+  let currentUrl: string | null = null;
+  const showNext = () => {
+    if (!nextFrame) return;
+    showing = true;
+    const url = URL.createObjectURL(nextFrame);
+    nextFrame = null;
+    const prev = currentUrl;
+    currentUrl = url;
+    img.src = url;
+    img.decode().catch(() => undefined).finally(() => {
+      if (prev) URL.revokeObjectURL(prev);
+      showing = false;
+      placeholder.hidden = true;
+      fpsCount++;
+      showNext();
+    });
+  };
+  const pushFrame = (blob: Blob) => {
+    nextFrame = blob;
+    if (!showing) showNext();
+  };
+
+  // ---------- 1) WebSocket 실시간 모드 ----------
+  /** 서버가 status 를 보내면 true, 실패/시간초과면 false */
+  const connectWs = () =>
+    new Promise<boolean>((resolve) => {
+      let ready = false;
+      const token = auth.token;
+      if (!token) return resolve(false);
+      let sock: WebSocket;
+      try {
+        sock = new WebSocket(wsUrl(`/api/ws/view/${encodeURIComponent(sessionId)}`));
+      } catch {
+        return resolve(false);
+      }
+      sock.binaryType = "blob";
+      const timer = window.setTimeout(() => {
+        if (!ready) {
+          sock.close();
+          resolve(false);
+        }
+      }, 4000);
+      sock.onopen = () => sock.send(JSON.stringify(WsAuth.parse({ type: "auth", token })));
+      sock.onmessage = (ev: MessageEvent) => {
+        if (ev.data instanceof Blob) return pushFrame(ev.data);
+        let parsed;
+        try {
+          parsed = WsServerMessage.safeParse(JSON.parse(String(ev.data)));
+        } catch {
+          return;
+        }
+        if (!parsed.success) return; // 정의되지 않은 메시지는 무시
+        const msg = parsed.data;
+        if (msg.type === "status") {
+          if (!ready) {
+            ready = true;
+            window.clearTimeout(timer);
+            ws = sock;
+            mode = "ws";
+            resolve(true);
+          }
+          if (session) session = { ...session, allow_control: msg.allow_control, online: msg.host_online };
+          renderHeader();
+        } else {
+          error.textContent = msg.detail;
+          if (msg.detail.includes("종료")) disposed = true;
+        }
+      };
+      sock.onclose = () => {
+        window.clearTimeout(timer);
+        if (!ready) return resolve(false);
+        if (ws === sock) ws = null;
+        if (!disposed) void start(); // 끊기면 재연결 (실패 시 HTTP 로 전환)
+      };
+    });
+
+  // ---------- 2) HTTP 폴링 호환 모드 ----------
+  const pollLoop = async () => {
+    while (!disposed && mode === "http") {
       try {
         const f = await api.getFrame(sessionId, seq);
         if (f) {
           seq = f.seq;
-          img.src = `data:${f.mime};base64,${f.data_b64}`;
-          placeholder.hidden = true;
-          fpsCount++;
-          continue; // 바로 다음 프레임 요청
+          const bin = Uint8Array.from(atob(f.data_b64), (c) => c.charCodeAt(0));
+          pushFrame(new Blob([bin], { type: f.mime }));
+          continue;
         }
       } catch (e) {
         if (e instanceof ApiError && (e.status === 404 || e.status === 403)) {
@@ -67,18 +146,29 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
         }
         if (e instanceof ApiError && e.status === 401) return go("#/login");
       }
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 100));
     }
   };
 
+  const start = async () => {
+    mode = "connecting";
+    if (await connectWs()) return;
+    if (disposed) return;
+    mode = "http";
+    void pollLoop();
+  };
+
   const metaTimer = window.setInterval(async () => {
-    status.textContent = `${fpsCount} fps · ${session?.online ? "호스트 온라인" : "호스트 오프라인"}`;
+    const label = mode === "ws" ? "실시간" : mode === "http" ? "호환 모드(HTTP)" : "연결 중";
+    status.textContent = `${fpsCount} fps · ${label} · ${session?.online ? "호스트 온라인" : "호스트 오프라인"}`;
     fpsCount = 0;
-    try {
-      session = await api.getSession(sessionId);
-      renderHeader();
-    } catch {
-      /* 다음 주기에 재시도 */
+    if (mode !== "ws") {
+      try {
+        session = await api.getSession(sessionId);
+        renderHeader();
+      } catch {
+        /* 다음 주기에 재시도 */
+      }
     }
   }, 1000);
 
@@ -95,6 +185,7 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
       pendingMove = null;
     }
     queue.push(ev);
+    if (mode === "ws") flush(); // 클릭/키 입력은 바로 전송
   };
 
   img.addEventListener("mousemove", (e) => {
@@ -133,22 +224,29 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
   img.addEventListener("keyup", onKey("key_up"));
 
   let sending = false;
-  const flushTimer = window.setInterval(async () => {
+  const flush = () => {
     if (pendingMove) {
       queue.push(pendingMove);
       pendingMove = null;
     }
-    if (sending || queue.length === 0 || !canControl()) return;
+    if (queue.length === 0 || !canControl()) return;
+    if (mode === "ws" && ws?.readyState === WebSocket.OPEN) {
+      while (queue.length) ws.send(JSON.stringify(WsInput.parse({ type: "input", events: queue.splice(0, 200) })));
+      return;
+    }
+    if (sending || mode !== "http") return;
     const batch = queue.splice(0, 200);
     sending = true;
-    try {
-      await api.sendInput(sessionId, batch);
-    } catch (e) {
-      error.textContent = e instanceof Error ? e.message : String(e);
-    } finally {
-      sending = false;
-    }
-  }, 80);
+    api
+      .sendInput(sessionId, batch)
+      .catch((e: unknown) => {
+        error.textContent = e instanceof Error ? e.message : String(e);
+      })
+      .finally(() => {
+        sending = false;
+      });
+  };
+  const flushTimer = window.setInterval(flush, 30);
 
   const el = h(
     "main",
@@ -169,7 +267,7 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
     .then((s) => {
       session = s;
       renderHeader();
-      void frameLoop();
+      void start();
     })
     .catch((e) => {
       error.textContent = e instanceof Error ? e.message : String(e);
@@ -180,6 +278,8 @@ export function viewerView(sessionId: string, go: (hash: string) => void): { el:
     dispose: () => {
       disposed = true;
       queue = [];
+      ws?.close();
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
       window.clearInterval(metaTimer);
       window.clearInterval(flushTimer);
     },

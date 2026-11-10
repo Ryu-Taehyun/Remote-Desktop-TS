@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import CORS_ORIGINS
 from .db import engine
+from . import realtime
 from .routers import auth, sessions
 
 app = FastAPI(title="Remote Desktop API", version="1.0.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -20,6 +21,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(sessions.router)
+app.include_router(realtime.router)
 
 
 def _db_error_text(exc: Exception) -> str:

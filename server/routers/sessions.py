@@ -16,6 +16,8 @@ from ..schemas import (
     FrameAck, FrameOut, FrameUpload, InputBatch, InputBatchOut, JoinRequest, Ok,
     SessionCreate, SessionOut, SessionUpdate,
 )
+from ..realtime import hub
+from ..schemas import WsInput
 from ..security import current_user
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -115,6 +117,7 @@ def update_session(
     if not body.allow_control:
         db.execute(delete(InputEvent).where(InputEvent.session_id == s.id))
     db.commit()
+    hub.notify_control(s.id, body.allow_control)
     return _out(s, user)
 
 
@@ -125,6 +128,7 @@ def end_session(session_id: uuid.UUID, user: User = Depends(current_user), db: S
     db.execute(delete(Frame).where(Frame.session_id == s.id))
     db.execute(delete(InputEvent).where(InputEvent.session_id == s.id))
     db.commit()
+    hub.close_room(s.id, "세션이 종료되었습니다")
     return Ok()
 
 
@@ -154,6 +158,7 @@ def upload_frame(
     seq = db.execute(stmt).scalar_one()
     s.last_seen = datetime.now(timezone.utc)
     db.commit()
+    hub.publish(s.id, data, body.width, body.height)  # WebSocket 뷰어에게도 전달
     return FrameAck(seq=seq, allow_control=s.allow_control)
 
 
@@ -165,8 +170,17 @@ def get_frame(
     db: Session = Depends(get_db),
 ):
     s = _require_member(db, session_id, user)
+    room = hub.get(s.id)
+    if room is not None and room.host is not None and room.frame is not None:  # WebSocket 호스트의 최신 프레임
+        if room.seq == after:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return FrameOut(
+            seq=room.seq, width=room.width, height=room.height, mime="image/jpeg",
+            data_b64=base64.b64encode(room.frame).decode(),
+        )
     f = db.get(Frame, s.id)
-    if f is None or f.seq <= after:
+    # seq 가 같을 때만 204 (프레임 출처가 바뀌어 seq 가 달라지면 새 프레임으로 간주)
+    if f is None or f.seq == after:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     return FrameOut(seq=f.seq, width=f.width, height=f.height, mime=f.mime, data_b64=base64.b64encode(f.data).decode())
 
@@ -179,6 +193,8 @@ def send_input(
     s = _require_member(db, session_id, user)
     if not s.allow_control:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "호스트가 원격 제어를 허용하지 않았습니다")
+    if hub.push_input_threadsafe(s.id, WsInput(type="input", events=body.events)):
+        return Ok()  # WebSocket 호스트에 바로 전달
     db.add_all(InputEvent(session_id=s.id, payload=e.model_dump()) for e in body.events)
     db.commit()
     return Ok()
