@@ -8,3 +8,4 @@ web/dist/
 .env
 .env.local
 .vercel/
+remote-desktop.zip
