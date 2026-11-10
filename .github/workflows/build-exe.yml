@@ -2,8 +2,13 @@ name: Build Windows EXE
 
 on:
   push:
-    tags: ["v*"]        # v1.0.0 같은 태그를 push 하면 빌드 후 Releases 에 업로드
-  workflow_dispatch:    # Actions 탭에서 수동 실행 (아티팩트로만 업로드)
+    branches: [main]    # 호스트 앱 코드가 바뀌면 자동으로 빌드 → 새 Release(v1.0.<실행번호>)
+    paths:
+      - "agent/**"
+      - "run_host.py"
+      - ".github/workflows/build-exe.yml"
+    tags: ["v*"]        # v1.2.0 같은 태그를 직접 push 하면 그 이름으로 Release
+  workflow_dispatch:    # Actions 탭에서 수동 실행
 
 permissions:
   contents: write
@@ -43,8 +48,11 @@ jobs:
           path: dist/RemoteDesktopHost.exe
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          name: RemoteDesktopHost ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
           files: dist/RemoteDesktopHost.exe
           generate_release_notes: true
+          make_latest: true

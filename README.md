@@ -83,10 +83,10 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/remote_desktop_t
 
 - 마지막으로 로그인한 서버 주소와 이메일을 `%APPDATA%\RemoteDesktopHost\settings.json`에 기억합니다. 비밀번호는 저장하지 않습니다.
 - 처음 실행하면 Windows SmartScreen이 "알 수 없는 게시자"라고 경고할 수 있습니다. 코드 서명이 없어서 그렇고, **추가 정보 → 실행**을 누르면 됩니다.
-- 빌드는 GitHub Actions(`.github/workflows/build-exe.yml`)가 Windows에서 PyInstaller로 합니다. `v1.0.1`처럼 `v`로 시작하는 태그를 push하면 새 Release가 만들어집니다.
+- 빌드는 GitHub Actions(`.github/workflows/build-exe.yml`)가 Windows에서 PyInstaller로 합니다. `main`에 `agent/` 또는 `run_host.py` 변경이 push되면 자동으로 새 Release(`v1.0.<실행번호>`)가 만들어집니다. 원하는 버전명이 있으면 태그를 push하세요.
 
   ```bash
-  git tag v1.0.1 && git push origin v1.0.1
+  git tag v1.2.0 && git push origin v1.2.0
   ```
 
 소스에서 바로 실행하려면:
