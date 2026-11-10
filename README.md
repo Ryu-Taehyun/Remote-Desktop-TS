@@ -77,6 +77,24 @@ python -m agent
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/remote_desktop_test pytest -q
 ```
 
+## 빠른 실행: Windows용 .exe (Python 설치 불필요)
+
+[Releases](https://github.com/Ryu-Taehyun/Remote-Desktop-TS/releases/latest)에서 `RemoteDesktopHost.exe`를 받아 더블클릭하면 호스트 앱이 실행됩니다.
+
+- 마지막으로 로그인한 서버 주소와 이메일을 `%APPDATA%\RemoteDesktopHost\settings.json`에 기억합니다. 비밀번호는 저장하지 않습니다.
+- 처음 실행하면 Windows SmartScreen이 "알 수 없는 게시자"라고 경고할 수 있습니다. 코드 서명이 없어서 그렇고, **추가 정보 → 실행**을 누르면 됩니다.
+- 빌드는 GitHub Actions(`.github/workflows/build-exe.yml`)가 Windows에서 PyInstaller로 합니다. `v1.0.1`처럼 `v`로 시작하는 태그를 push하면 새 Release가 만들어집니다.
+
+  ```bash
+  git tag v1.0.1 && git push origin v1.0.1
+  ```
+
+소스에서 바로 실행하려면:
+
+```bash
+python run_host.py
+```
+
 ## Vercel 배포
 
 1. 이 폴더를 GitHub 저장소로 push한 뒤 Vercel에서 Import합니다. 설정은 `vercel.json`에 모두 들어 있어서 Framework Preset 등은 바꾸지 않아도 됩니다.

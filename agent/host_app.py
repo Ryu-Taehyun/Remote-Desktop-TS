@@ -5,12 +5,14 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 import queue
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from pydantic import ValidationError
@@ -19,6 +21,24 @@ from .client import ApiClient, ApiError
 from .protocol import SessionOut, TokenResponse
 
 DEFAULT_SERVER = os.getenv("RD_SERVER", "http://localhost:8000")
+SETTINGS_PATH = Path(os.getenv("APPDATA") or Path.home() / ".config") / "RemoteDesktopHost" / "settings.json"
+
+
+def load_settings() -> dict:
+    """마지막으로 사용한 서버 주소/이메일 (비밀번호는 저장하지 않음)."""
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        return {k: str(v) for k, v in data.items() if k in ("server", "email")}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_settings(**values: str) -> None:
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(json.dumps(load_settings() | values, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 class HostApp(tk.Tk):
@@ -81,8 +101,9 @@ class HostApp(tk.Tk):
         self._clear()
         c = self.container
         mode = tk.StringVar(value="login")
-        server = tk.StringVar(value=DEFAULT_SERVER)
-        email, username, password = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        saved = load_settings()
+        server = tk.StringVar(value=os.getenv("RD_SERVER") or saved.get("server") or DEFAULT_SERVER)
+        email, username, password = tk.StringVar(value=saved.get("email", "")), tk.StringVar(), tk.StringVar()
 
         ttk.Label(c, text="원격 데스크톱 호스트", font=("", 16, "bold")).pack(anchor="w", pady=(0, 12))
         tabs = ttk.Frame(c)
@@ -126,6 +147,7 @@ class HostApp(tk.Tk):
 
             def ok(t: TokenResponse):
                 self.user = t
+                save_settings(server=api.base_url, email=t.user.email)
                 self.show_main()
 
             def err(msg: str):
