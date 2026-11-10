@@ -13,6 +13,8 @@ engine = create_engine(
     DATABASE_URL,
     poolclass=NullPool if _serverless else None,
     pool_pre_ping=True,
+    # DB 가 꺼져 있거나 주소가 틀리면 무한정 기다리지 않고 5초 안에 실패
+    connect_args={"connect_timeout": 5},
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
