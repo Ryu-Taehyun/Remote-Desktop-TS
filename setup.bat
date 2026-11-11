@@ -77,8 +77,12 @@ if not defined PGBIN (
   goto :fail
 )
 echo   사용: !PGBIN!
-rem 서비스가 멈춰 있으면 시작 (관리자 권한 필요)
-powershell -NoProfile -Command "Get-Service postgresql* -ErrorAction SilentlyContinue | Where-Object Status -ne 'Running' | Start-Service -ErrorAction SilentlyContinue" >nul 2>&1
+rem 서비스가 멈춰 있으면 (사용 안 함이면 자동 시작으로 바꾼 뒤) 시작 - 관리자 권한 필요
+powershell -NoProfile -Command "$ok = $true; Get-Service postgresql* -ErrorAction SilentlyContinue | ForEach-Object { if ($_.Status -ne 'Running') { try { if ($_.StartType -eq 'Disabled') { Set-Service $_.Name -StartupType Automatic -ErrorAction Stop }; Start-Service $_.Name -ErrorAction Stop; Write-Host ('  service started: ' + $_.Name) } catch { $ok = $false; Write-Host ('  service not started: ' + $_.Name) } } else { Write-Host ('  service running: ' + $_.Name) } }; if (-not $ok) { exit 1 }"
+if errorlevel 1 (
+  echo   [안내] PostgreSQL 서비스를 시작하지 못했습니다. setup.bat 을 "관리자 권한으로 실행" 하거나,
+  echo          services.msc 에서 postgresql-x64-... 서비스를 "자동" 으로 바꾸고 시작하세요.
+)
 echo.
 
 rem ---------------------------------------------------------- 4. Python 패키지
