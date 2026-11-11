@@ -32,7 +32,28 @@ Python(FastAPI) + TypeScript + PostgreSQL + Python GUI(tkinter)로 만든 웹 �
 - 입력 이벤트는 `mouse_move`, `mouse_down`, `mouse_up`, `wheel`, `key_down`, `key_up` 여섯 종류만 허용됩니다.
 - WebSocket에서는 바이너리 메시지는 JPEG 프레임만, 텍스트 메시지는 `auth`, `frame_meta`, `input`, `status`, `error`만 허용됩니다.
 
-## 설치 (서버 컴퓨터, 처음 한 번)
+## 한 번에 설치하기 (Windows, 추천)
+
+저장소를 받은 폴더에서 **`setup.bat`을 마우스 오른쪽 클릭 → 관리자 권한으로 실행**합니다. 한 번에 아래 과정을 모두 진행합니다.
+
+| 단계 | 내용 |
+|---|---|
+| 1. Python | 3.11 이상(tkinter 포함)이 없으면 winget으로 Python 3.12 설치 |
+| 2. Node.js | 18 이상이 없으면 winget으로 Node.js LTS 설치 |
+| 3. PostgreSQL | 없으면 winget으로 PostgreSQL 18 설치(비밀번호 `postgres`, 포트 5432), 서비스 시작 |
+| 4. Python 패키지 | `.venv` 가상환경을 만들고 `requirements-dev.txt`와 `agent/requirements.txt` 설치 |
+| 5. 데이터베이스 | `remote_desktop` DB 생성. 비밀번호가 `postgres`가 아니면 물어보고(입력은 화면에 표시되지 않음) `.env`에 저장 |
+| 6. 웹 | `web/`에서 `npm install`과 `npm run build` 실행 |
+| 방화벽 | 관리자 권한으로 실행했다면 8000번 포트 허용 |
+
+설치가 끝나면 **`start_server.bat`을 더블클릭**하면 서버가 시작됩니다. 창에 이 컴퓨터와 다른 기기에서 접속할 주소가 표시됩니다.
+
+- 이미 설치된 것은 건너뛰므로 여러 번 실행해도 됩니다. 코드를 업데이트한 뒤에도 다시 실행하세요.
+- winget이 없는 Windows(일부 구형 Windows 10)에서는 Python, Node.js, PostgreSQL을 직접 설치한 뒤 실행하세요.
+- 묻지 않고 진행하려면 `setup.bat /y`를 씁니다. 이때 PostgreSQL 비밀번호는 환경 변수 `RD_PG_PASSWORD`로 지정합니다.
+- `setup.bat`은 GitHub Actions의 Windows 환경에서 매번 실행해 검증합니다(`.github/workflows/windows-setup.yml`).
+
+## 직접 설치 (서버 컴퓨터, 처음 한 번)
 
 필요한 것: Python 3.11 이상, Node.js 20 이상, PostgreSQL 16 이상(또는 Docker). 아래 명령은 Windows PowerShell 기준입니다.
 
@@ -137,13 +158,15 @@ $env:TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/remote_des
 
 | 방식 | 언제 | 속도(1280px, 품질 60 기준 측정) |
 |---|---|---|
-| **실시간 (WebSocket)** | 기본 | 약 27–30 fps. 입력이 즉시 전달됨 |
+| **실시간 (WebSocket)** | 기본 | 약 56–60 fps (FPS 설정 60). 입력이 즉시 전달됨 |
 | **호환 모드 (HTTP 폴링)** | 프록시나 방화벽 때문에 WebSocket이 막힌 경우 자동 전환 | 약 8–10 fps |
 
 현재 방식은 호스트 앱 상태줄과 뷰어 오른쪽 위에 표시됩니다.
 
 - 실시간 모드에서는 프레임이 DB를 거치지 않고 서버 메모리에서 바로 전달됩니다.
-- 뷰어가 느리면 중간 프레임을 건너뛰고 항상 최신 화면을 보여 줍니다. 화면이 바뀌지 않으면 프레임을 보내지 않습니다.
+- 호스트 앱은 여러 스레드(CPU 코어 수에 맞춰 최대 3개)가 동시에 캡처하고 압축합니다. 축소에는 BOX 필터를 써서 속도와 글자 선명도를 함께 챙깁니다.
+- 뷰어가 느리면 중간 프레임을 건너뛰고 항상 최신 화면을 보여 줍니다. 화면이 바뀌지 않으면 압축도 전송도 하지 않고, 1초마다 마지막 화면만 다시 보냅니다.
+- FPS는 1–60 사이에서 고를 수 있습니다(기본 30). 60 fps, 1280px 기준 네트워크 사용량은 약 2MB/s입니다.
 - 더 빠르게 하려면 호스트 앱에서 **최대 너비**를 1024로, **JPEG 품질**을 40–50으로 낮추세요.
 
 ## 호스트 OS별 참고

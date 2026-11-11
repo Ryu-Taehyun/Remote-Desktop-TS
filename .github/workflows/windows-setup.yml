@@ -1,0 +1,53 @@
+name: Windows setup test
+
+# setup.bat 이 실제 Windows 에서 처음부터 끝까지 동작하는지 확인
+on:
+  push:
+    branches: [main]
+    paths:
+      - "setup.bat"
+      - "start_server.bat"
+      - "scripts/**"
+      - "server/**"
+      - "requirements*.txt"
+      - "agent/requirements.txt"
+      - ".github/workflows/windows-setup.yml"
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run setup.bat /y
+        shell: cmd
+        env:
+          RD_PG_PASSWORD: root   # GitHub Windows 러너에 설치된 PostgreSQL 의 postgres 비밀번호
+        run: call setup.bat /y
+
+      - name: Start server and check API, DB and web page
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".venv\Scripts\python.exe" -ArgumentList "-m","uvicorn","server.main:app","--host","0.0.0.0","--port","8000" -PassThru -NoNewWindow -RedirectStandardOutput server.log -RedirectStandardError server.err
+          $r = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            try { $r = Invoke-RestMethod http://localhost:8000/api/health/db; if ($r.database -eq "connected") { break } } catch {}
+            Start-Sleep -Seconds 1
+          }
+          $r | ConvertTo-Json
+          if ($r.database -ne "connected") { Get-Content server.err; throw "database not connected" }
+          $html = (Invoke-WebRequest http://localhost:8000/ -UseBasicParsing).Content
+          if ($html -notmatch "<title>Remote Desktop</title>") { throw "web page not served" }
+          "web page OK"
+          Stop-Process -Id $p.Id -Force
+
+      - name: Run test suite on Windows
+        shell: pwsh
+        env:
+          PGPASSWORD: root
+        run: |
+          $psql = Get-ChildItem "$env:ProgramFiles\PostgreSQL\*\bin\psql.exe" | Select-Object -Last 1
+          & $psql.FullName -h 127.0.0.1 -U postgres -c "CREATE DATABASE remote_desktop_test;"
+          $env:TEST_DATABASE_URL = "postgresql://postgres:root@127.0.0.1:5432/remote_desktop_test"
+          .venv\Scripts\python.exe -m pytest -q

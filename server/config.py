@@ -6,6 +6,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _load_dotenv(path: Path) -> None:
+    """프로젝트 루트의 .env (KEY=VALUE) 를 읽는다. 이미 설정된 환경 변수는 덮어쓰지 않는다."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(ROOT / ".env")
+
+
 def _database_url() -> str:
     url = os.getenv("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/remote_desktop"
     # SQLAlchemy 가 psycopg(v3) 드라이버를 쓰도록 스킴 정규화

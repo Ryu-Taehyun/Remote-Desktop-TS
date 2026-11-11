@@ -54,6 +54,9 @@ class HostApp(tk.Tk):
         self.stop_event = threading.Event()
         self.workers: list[threading.Thread] = []
         self.rt = None  # RealtimeHost (WebSocket 실시간 연결)
+        from .capture import CaptureSettings
+
+        self.capture = CaptureSettings(fps=30, max_width=1280, quality=60)
         self.ui_queue: queue.Queue = queue.Queue()  # 워커 스레드 → UI 스레드 메시지
 
         self.container = ttk.Frame(self, padding=16)
@@ -172,16 +175,31 @@ class HostApp(tk.Tk):
 
         self.name_var = tk.StringVar(value=platform.node() or "My PC")
         self.control_var = tk.BooleanVar(value=False)
-        self.fps_var = tk.IntVar(value=15)
-        self.quality_var = tk.IntVar(value=60)
-        self.width_var = tk.StringVar(value="1280")
+        self.fps_var = tk.IntVar(value=self.capture.fps)
+        self.quality_var = tk.IntVar(value=self.capture.quality)
+        self.width_var = tk.StringVar(value=str(self.capture.max_width))
+
+        def sync_capture(*_):
+            """Tk 변수는 메인 스레드에서만 읽고, 캡처 스레드는 이 값을 사용한다."""
+            try:
+                self.capture.fps = max(1, min(60, int(self.fps_var.get())))
+            except (tk.TclError, ValueError):
+                pass
+            try:
+                self.capture.quality = max(20, min(90, int(float(self.quality_var.get()))))
+                self.capture.max_width = int(self.width_var.get())
+            except (tk.TclError, ValueError):
+                pass
+
+        for var in (self.fps_var, self.quality_var, self.width_var):
+            var.trace_add("write", sync_capture)
 
         f = ttk.LabelFrame(c, text="세션 설정", padding=10)
         f.pack(fill="x")
         ttk.Label(f, text="PC 이름").grid(row=0, column=0, sticky="w")
         ttk.Entry(f, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", pady=2)
         ttk.Label(f, text="FPS").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(f, from_=1, to=30, textvariable=self.fps_var, width=6).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Spinbox(f, from_=1, to=60, textvariable=self.fps_var, width=6).grid(row=1, column=1, sticky="w", pady=2)
         ttk.Label(f, text="JPEG 품질").grid(row=2, column=0, sticky="w")
         ttk.Scale(f, from_=20, to=90, variable=self.quality_var, orient="horizontal").grid(row=2, column=1, sticky="ew")
         ttk.Label(f, text="최대 너비(px)").grid(row=3, column=0, sticky="w")
@@ -307,51 +325,64 @@ class HostApp(tk.Tk):
         self.write_log(msg)
 
     def _frame_worker(self) -> None:
-        """화면 캡처 → 전송. WebSocket(실시간)을 먼저 시도하고, 안 되면 HTTP 로 보낸다."""
-        from .capture import ScreenCapturer
+        """화면 캡처 → 전송. WebSocket(실시간)을 먼저 시도하고, 안 되면 HTTP 로 보낸다.
+
+        캡처·압축은 FrameProducer 의 여러 스레드가 병렬로 하고, 이 스레드는 최신 프레임 전송만 맡는다.
+        """
+        import base64
+        import dataclasses
+
+        from .capture import FrameProducer
+        from .protocol import FrameUpload
         from .realtime import RealtimeHost
 
         assert self.api and self.session and self.user
         api, sid, token = self.api, self.session.id, self.user.access_token
+        # HTTP 모드에서는 요청 왕복이 병목이라 10fps 로 제한
+        settings = dataclasses.replace(self.capture)
         try:
-            cap = ScreenCapturer()
+            prod = FrameProducer(settings)
+            prod.start()
         except Exception as e:
             self.ui(lambda: self._session_gone(f"화면 캡처 초기화 실패: {e}"))
             return
-        self.monitor = cap.monitor
+        self.monitor = prod.monitor
+        self.ui(lambda n=prod.workers: self.write_log(f"캡처 스레드 {n}개 사용"))
         frames, t0, errors, size = 0, time.monotonic(), 0, 0
-        last_jpeg, last_sent, next_ws_try = b"", 0.0, 0.0
+        sent_seq, last_sent, next_ws_try = 0, 0.0, 0.0
         try:
             while not self.stop_event.is_set():
-                start = time.monotonic()
-                if self.rt is None and start >= next_ws_try:
+                now = time.monotonic()
+                if self.rt is None and now >= next_ws_try:
                     self.rt = RealtimeHost.connect(api.base_url, token, sid)
-                    next_ws_try = start + 10  # 실패하면 10초 뒤 재시도 (그동안 HTTP)
+                    next_ws_try = now + 10  # 실패하면 10초 뒤 재시도 (그동안 HTTP)
                     mode = "실시간(WebSocket)" if self.rt else "호환 모드(HTTP)"
                     self.ui(lambda m=mode: self.write_log(f"전송 방식: {m}"))
                     if self.rt:
                         self._apply_control(self.rt.status.allow_control)
                 rt = self.rt
-                max_fps = 30 if rt else 10
-                fps = max(1, min(max_fps, int(self.fps_var.get() or 1)))
+                # 최신 설정 반영 (WebSocket 은 최대 60fps, HTTP 는 10fps)
+                settings.fps = min(self.capture.fps, 60 if rt else 10)
+                settings.max_width, settings.quality = self.capture.max_width, self.capture.quality
+                if prod.error is not None:
+                    self.ui(lambda e=prod.error: self._session_gone(f"화면 캡처 오류: {e}"))
+                    return
+                frame = prod.next(sent_seq, timeout=0.5)
+                if frame is None:
+                    # 화면 변화가 없을 때도 1초마다 마지막 프레임을 보내 연결/온라인 상태 유지
+                    if prod.latest is None or time.monotonic() - last_sent < 1:
+                        continue
+                    frame = prod.latest
                 try:
-                    jpeg, w, h = cap.grab_jpeg(max_width=int(self.width_var.get()), quality=int(self.quality_var.get()))
-                    size = len(jpeg)
                     if rt is not None:
-                        # 화면이 그대로면 보내지 않음 (1초마다 한 번은 보내서 연결 유지)
-                        if jpeg != last_jpeg or start - last_sent > 1:
-                            rt.send_frame(jpeg, w, h)
-                            last_jpeg, last_sent = jpeg, start
-                            frames += 1
+                        rt.send_frame(frame.jpeg, frame.width, frame.height)
                     else:
-                        import base64
-
-                        from .protocol import FrameUpload
-
                         ack = api.upload_frame(sid, FrameUpload(
-                            width=w, height=h, mime="image/jpeg", data_b64=base64.b64encode(jpeg).decode()))
-                        frames += 1
+                            width=frame.width, height=frame.height, mime="image/jpeg",
+                            data_b64=base64.b64encode(frame.jpeg).decode()))
                         self._apply_control(ack.allow_control)
+                    sent_seq, last_sent, size = frame.seq, time.monotonic(), len(frame.jpeg)
+                    frames += 1
                     errors = 0
                 except ApiError as e:
                     if e.status in (403, 404):
@@ -377,9 +408,8 @@ class HostApp(tk.Tk):
                     self.ui(lambda r=rate, n=size, m=mode: self.status_var.set(
                         f"공유 중 · {m} · {r:.1f} fps · 프레임 {n // 1024} KB"))
                     frames, t0 = 0, now
-                self.stop_event.wait(max(0.0, 1 / fps - (time.monotonic() - start)))
         finally:
-            cap.close()
+            prod.stop()
             if self.rt is not None:
                 self.rt.close()
                 self.rt = None
